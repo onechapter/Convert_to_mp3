@@ -14,7 +14,8 @@ if not os.path.exists(DOWNLOAD_FOLDER):
 
 FFMPEG_LOCATION = "C:\\Program Files\\ffmpeg" 
 
-# --- HÀM CHUẨN HÓA TÊN FILE (Giữ nguyên) ---
+# --- HÀM CHUẨN HÓA TÊN FILE (GIỮ NGUYÊN) ---
+# DÙNG CHỦ YẾU CHO VIỆC KIỂM TRA TỒN TẠI FILE Ở BƯỚC ĐẦU
 def get_safe_filename(title):
     if not title:
         title = "unknown_video_title"
@@ -69,7 +70,7 @@ def index():
         # --- KẾT THÚC: LẤY VÀ GHI COOKIE VÀO TỆP ---
 
 
-        # --- KIỂM TRA TỒN TẠI FILE (Sử dụng cookie để có thể truy cập title) ---
+        # --- KIỂM TRA TỒN TẠI FILE (BƯỚC 1: LẤY TIÊU ĐỀ) ---
         try:
             info_command = [
                 'yt-dlp', 
@@ -79,17 +80,15 @@ def index():
                 youtube_url
             ]
             
-            # SỬA LỖI GIẢI MÃ 1/2: Bỏ text=True và encoding
             title_result = subprocess.run(info_command, check=True, capture_output=True) 
             
-            # Giải mã thủ công: dùng errors='ignore' để bỏ qua ký tự lỗi nếu cần
             if title_result.stdout:
                 video_title = title_result.stdout.decode('utf-8', errors='ignore').strip()
             else:
                 video_title = None
             
             if not video_title:
-                 raise Exception("Không thể lấy tiêu đề video. Đang chuyển sang tải trực tiếp...")
+                 raise Exception("Không thể lấy tiêu đề video.")
             
             estimated_safe_name = get_safe_filename(video_title)
             estimated_safe_path = os.path.join(app.config['DOWNLOAD_FOLDER'], estimated_safe_name)
@@ -100,14 +99,13 @@ def index():
                 return render_template('index.html', download_link=download_link, error_message="File đã tồn tại. Đây là liên kết tải xuống.")
                 
         except subprocess.CalledProcessError as e:
-            # Nếu có lỗi, chúng ta cần cố gắng giải mã lỗi đó
             error_message_temp = f"Lỗi lấy thông tin: {e.stderr.decode('utf-8', errors='ignore')}"
         except Exception as e:
             error_message_temp = f"Lỗi hệ thống khi lấy thông tin: {e}"
         # --- KẾT THÚC KIỂM TRA TỒN TẠI FILE ---
 
 
-        # --- BẮT ĐẦU QUÁ TRÌNH TẢI NẾU FILE CHƯA TỒN TẠI ---
+        # --- BẮT ĐẦU QUÁ TRÌNH TẢI (BƯỚC 2: TẢI XUỐNG VÀ PHÂN TÍCH TÊN FILE) ---
         try:
             command = [
                 'yt-dlp',
@@ -125,37 +123,42 @@ def index():
                 youtube_url                 
             ]
             
-            # SỬA LỖI GIẢI MÃ 2/2: Bỏ text=True và encoding
             result = subprocess.run(command, check=True, capture_output=True) 
             
-            # 3. XỬ LÝ KẾT QUẢ VÀ DỌN DẸP
-            if not estimated_safe_name:
-                # Nếu không lấy được tên, thử lấy lại lần cuối
-                info_command = ['yt-dlp', '--get-title', '--no-playlist', '--cookies', COOKIE_FILE, youtube_url]
-                title_result = subprocess.run(info_command, check=True, capture_output=True)
-                video_title = title_result.stdout.decode('utf-8', errors='ignore').strip() if title_result.stdout else None
-                if not video_title:
-                     # Nếu vẫn không lấy được, đặt tên mặc định để không crash
-                     estimated_safe_name = get_safe_filename(None) 
-                else:
-                    estimated_safe_name = get_safe_filename(video_title)
-
-            final_file = estimated_safe_name 
+            
+            # 3. SỬA LỖI TÌM FILE: PHÂN TÍCH LOG CỦA YT-DLP
+            final_file = None
+            # Giải mã stdout và stderr để tìm tên file đã lưu
+            output_log = result.stdout.decode('utf-8', errors='ignore') + result.stderr.decode('utf-8', errors='ignore')
+            
+            # Regex để tìm tên file cuối cùng (thường là Saving or Merging...)
+            # Tên file luôn nằm sau 'Destination:' và kết thúc bằng .mp3 
+            # Dùng regex để tìm chuỗi kết thúc bằng .mp3 trong thư mục downloads/
+            # Lấy tên file đã được lưu: [download] Destination: downloads\ten_file_an_toan.mp3
+            match = re.search(r'Destination: {}(.+?\.mp3)'.format(re.escape(DOWNLOAD_FOLDER + os.sep)), output_log)
+            
+            if match:
+                # final_file là tên file cuối cùng mà yt-dlp đã lưu
+                final_file = match.group(1).strip()
+            
             
             if os.path.exists(COOKIE_FILE):
                 os.remove(COOKIE_FILE)
 
-            if estimated_safe_name and os.path.exists(os.path.join(app.config['DOWNLOAD_FOLDER'], estimated_safe_name)):
-                download_link = f"/download/{estimated_safe_name}"
+            if final_file and os.path.exists(os.path.join(app.config['DOWNLOAD_FOLDER'], final_file)):
+                download_link = f"/download/{final_file}"
             else:
-                error_message = f"Tải xuống thành công nhưng không tìm thấy file MP3 cuối cùng."
+                # Nếu không tìm thấy file theo log, thử lại bằng tên ước tính (backup)
+                if estimated_safe_name and os.path.exists(os.path.join(app.config['DOWNLOAD_FOLDER'], estimated_safe_name)):
+                     download_link = f"/download/{estimated_safe_name}"
+                else:
+                    error_message = f"Tải xuống thành công nhưng không tìm thấy file MP3 cuối cùng trong thư mục {DOWNLOAD_FOLDER}. Tên file có thể không khớp."
 
         except subprocess.CalledProcessError as e:
             if os.path.exists(COOKIE_FILE): os.remove(COOKIE_FILE)
-            # SỬA LỖI: Giải mã lỗi thủ công
             error_output = e.stderr.decode('utf-8', errors='ignore')
             if "HTTP Error 403: Forbidden" in error_output:
-                 error_message = "LỖI TẢI XUỐNG: YouTube từ chối truy cập (403 Forbidden). Vui lòng kiểm tra lại cookie của Firefox (đã đăng nhập) và đóng Firefox."
+                 error_message = "LỖI TẢI XUỐNG: YouTube từ chối truy cập (403 Forbidden). Vui lòng kiểm tra lại cookie."
             else:
                  error_message = f"Lỗi Tải Xuống: {error_output}"
         
