@@ -6,29 +6,21 @@ import re
 from unidecode import unidecode 
 
 app = Flask(__name__)
-# Đặt thư mục để lưu trữ file tải xuống.
 DOWNLOAD_FOLDER = 'downloads'
 app.config['DOWNLOAD_FOLDER'] = DOWNLOAD_FOLDER
 
-# Tạo thư mục downloads nếu nó chưa tồn tại
 if not os.path.exists(DOWNLOAD_FOLDER):
     os.makedirs(DOWNLOAD_FOLDER)
 
-# Cấu hình FFmpeg 
-# HÃY CHẮC CHẮN ĐƯỜNG DẪN NÀY LÀ CHÍNH XÁC (thường là thư mục 'bin' của FFmpeg)!
 FFMPEG_LOCATION = "C:\\Program Files\\ffmpeg" 
 
-# --- HÀM CHUẨN HÓA TÊN FILE THỦ CÔNG (Dùng để ước tính tên file đã tải) ---
-# Hàm này mô phỏng cách YT-DLP sử dụng --restrict-filenames
+# --- HÀM CHUẨN HÓA TÊN FILE (Giữ nguyên) ---
 def get_safe_filename(title):
     if not title:
         title = "unknown_video_title"
         
-    # 1. Bỏ dấu tiếng Việt và chuyển sang Latin (Lặng Yên -> Lang Yen)
     safe_name = unidecode(title) 
-    # 2. Thay thế mọi thứ không phải chữ cái, số, gạch dưới hoặc dấu chấm bằng dấu gạch dưới (Lang Yen -> Lang_Yen)
     safe_name = re.sub(r'[\W_]+', '_', safe_name).strip('_')
-    # 3. Thêm đuôi .mp3
     return f"{safe_name}.mp3"
 
 
@@ -39,44 +31,77 @@ def index():
 
     if request.method == 'POST':
         youtube_url = request.form.get('url')
-        
-        # ⚠️ Kiểm tra URL đầu vào
         if not youtube_url:
             error_message = "Vui lòng nhập URL YouTube."
             return render_template('index.html', download_link=download_link, error_message=error_message)
 
-        # Định nghĩa biến
         output_template_raw = os.path.join(app.config['DOWNLOAD_FOLDER'], '%(title)s.%(ext)s')
         COOKIE_FILE = os.path.join(app.root_path, 'cookies.txt')
         
-        # KHỞI TẠO BIẾN TRƯỚC KHỐI TRY ĐỂ TRÁNH LỖI PHẠM VI
         estimated_safe_name = None 
         video_title = None
         error_message_temp = None
 
-        # --- KIỂM TRA TỒN TẠI FILE TRƯỚC KHI TẢI ---
+        # --- BẮT ĐẦU: LẤY VÀ GHI COOKIE VÀO TỆP ---
         try:
-            # Lấy thông tin video (tiêu đề) mà không tải
-            info_command = ['yt-dlp', '--get-title', '--no-playlist', youtube_url]
-            title_result = subprocess.run(info_command, check=True, capture_output=True, text=True, encoding='utf-8')
+            cj = browser_cookie3.firefox(domain_name='youtube.com')
+            found_yt_cookie = False
             
-            # Xử lý lỗi NoneType: Kiểm tra .stdout trước khi gọi .strip()
-            video_title = title_result.stdout.strip() if title_result.stdout else None
+            if os.path.exists(COOKIE_FILE):
+                os.remove(COOKIE_FILE)
+                
+            with open(COOKIE_FILE, 'w') as f:
+                f.write(f"# Netscape HTTP Cookie File\n") 
+                for cookie in cj:
+                    if 'youtube.com' in cookie.domain:
+                        expires_value = str(cookie.expires) if cookie.expires is not None else '0'
+                        f.write(f"{cookie.domain}\tTRUE\t{cookie.path}\t{cookie.secure}\t{expires_value}\t{cookie.name}\t{cookie.value}\n")
+                        found_yt_cookie = True
+            
+            if not found_yt_cookie:
+                 if os.path.exists(COOKIE_FILE): os.remove(COOKIE_FILE)
+                 error_message = "LỖI COOKIE: Không tìm thấy cookie. Hãy đảm bảo bạn đã ĐĂNG NHẬP YouTube trên Firefox và Firefox đã ĐÓNG hoàn toàn."
+                 return render_template('index.html', error_message=error_message)
+
+        except Exception as e:
+            error_message = f"LỖI LẤY COOKIE: Vui lòng đóng Firefox. Lỗi chi tiết: {e}"
+            return render_template('index.html', error_message=error_message)
+        # --- KẾT THÚC: LẤY VÀ GHI COOKIE VÀO TỆP ---
+
+
+        # --- KIỂM TRA TỒN TẠI FILE (Sử dụng cookie để có thể truy cập title) ---
+        try:
+            info_command = [
+                'yt-dlp', 
+                '--get-title', 
+                '--no-playlist', 
+                '--cookies', COOKIE_FILE, 
+                youtube_url
+            ]
+            
+            # SỬA LỖI GIẢI MÃ 1/2: Bỏ text=True và encoding
+            title_result = subprocess.run(info_command, check=True, capture_output=True) 
+            
+            # Giải mã thủ công: dùng errors='ignore' để bỏ qua ký tự lỗi nếu cần
+            if title_result.stdout:
+                video_title = title_result.stdout.decode('utf-8', errors='ignore').strip()
+            else:
+                video_title = None
             
             if not video_title:
-                 raise Exception("Không thể lấy tiêu đề video (có thể do lỗi 403 hoặc URL không hợp lệ). Đang chuyển sang tải trực tiếp...")
+                 raise Exception("Không thể lấy tiêu đề video. Đang chuyển sang tải trực tiếp...")
             
-            # Ước tính tên file đã được chuẩn hóa
             estimated_safe_name = get_safe_filename(video_title)
             estimated_safe_path = os.path.join(app.config['DOWNLOAD_FOLDER'], estimated_safe_name)
 
-            # KIỂM TRA: Nếu file tên an toàn đã tồn tại, TRẢ VỀ LINK DOWNLOAD NGAY
             if os.path.exists(estimated_safe_path):
+                if os.path.exists(COOKIE_FILE): os.remove(COOKIE_FILE)
                 download_link = f"/download/{estimated_safe_name}"
                 return render_template('index.html', download_link=download_link, error_message="File đã tồn tại. Đây là liên kết tải xuống.")
                 
         except subprocess.CalledProcessError as e:
-            error_message_temp = f"Lỗi lấy thông tin: {e.stderr}"
+            # Nếu có lỗi, chúng ta cần cố gắng giải mã lỗi đó
+            error_message_temp = f"Lỗi lấy thông tin: {e.stderr.decode('utf-8', errors='ignore')}"
         except Exception as e:
             error_message_temp = f"Lỗi hệ thống khi lấy thông tin: {e}"
         # --- KẾT THÚC KIỂM TRA TỒN TẠI FILE ---
@@ -84,26 +109,6 @@ def index():
 
         # --- BẮT ĐẦU QUÁ TRÌNH TẢI NẾU FILE CHƯA TỒN TẠI ---
         try:
-            # 1. LẤY VÀ LƯU COOKIE TỰ ĐỘNG TỪ FIREFOX
-            cj = browser_cookie3.firefox(domain_name='youtube.com')
-            found_yt_cookie = False
-            with open(COOKIE_FILE, 'w') as f:
-                f.write(f"# Netscape HTTP Cookie File\n") 
-                for cookie in cj:
-                    if 'youtube.com' in cookie.domain:
-                        # SỬA LỖI: Chuyển None thành '0' để tránh lỗi YT-DLP Warning/403
-                        expires_value = str(cookie.expires) if cookie.expires is not None else '0'
-                        
-                        f.write(f"{cookie.domain}\tTRUE\t{cookie.path}\t{cookie.secure}\t{expires_value}\t{cookie.name}\t{cookie.value}\n")
-                        found_yt_cookie = True
-            
-            if not found_yt_cookie:
-                 if os.path.exists(COOKIE_FILE): os.remove(COOKIE_FILE)
-                 error_message = "LỖI COOKIE: Vui lòng đảm bảo bạn đã ĐĂNG NHẬP YouTube trên Firefox và Firefox đã ĐÓNG hoàn toàn."
-                 return render_template('index.html', error_message=error_message)
-
-
-            # 2. XÂY DỰNG VÀ CHẠY LỆNH YT-DLP
             command = [
                 'yt-dlp',
                 '-x',                       
@@ -112,43 +117,51 @@ def index():
                 '--cookies', COOKIE_FILE,   
                 '--ffmpeg-location', FFMPEG_LOCATION, 
                 '--no-playlist',            
-                '--restrict-filenames',     # Sử dụng tùy chọn này để yt-dlp tự tạo tên an toàn
+                '--restrict-filenames',     
                 '--output', output_template_raw,
+                '--sleep-requests', '1', 
+                '--no-warnings', 
+                '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36', 
                 youtube_url                 
             ]
             
-            result = subprocess.run(command, check=True, capture_output=True, text=True, encoding='utf-8')
+            # SỬA LỖI GIẢI MÃ 2/2: Bỏ text=True và encoding
+            result = subprocess.run(command, check=True, capture_output=True) 
             
             # 3. XỬ LÝ KẾT QUẢ VÀ DỌN DẸP
-            
-            # Nếu khối try đầu tiên thất bại, chúng ta phải lấy lại tiêu đề ở đây
             if not estimated_safe_name:
-                info_command = ['yt-dlp', '--get-title', '--no-playlist', youtube_url]
-                title_result = subprocess.run(info_command, check=True, capture_output=True, text=True, encoding='utf-8')
-                video_title = title_result.stdout.strip() if title_result.stdout else None
+                # Nếu không lấy được tên, thử lấy lại lần cuối
+                info_command = ['yt-dlp', '--get-title', '--no-playlist', '--cookies', COOKIE_FILE, youtube_url]
+                title_result = subprocess.run(info_command, check=True, capture_output=True)
+                video_title = title_result.stdout.decode('utf-8', errors='ignore').strip() if title_result.stdout else None
                 if not video_title:
-                     raise Exception("Tải xuống thành công nhưng không thể lấy tiêu đề cho link download.")
-                estimated_safe_name = get_safe_filename(video_title)
+                     # Nếu vẫn không lấy được, đặt tên mặc định để không crash
+                     estimated_safe_name = get_safe_filename(None) 
+                else:
+                    estimated_safe_name = get_safe_filename(video_title)
 
             final_file = estimated_safe_name 
             
-            # Dọn dẹp tệp cookie sau khi sử dụng thành công
             if os.path.exists(COOKIE_FILE):
                 os.remove(COOKIE_FILE)
 
-            if final_file and os.path.exists(os.path.join(app.config['DOWNLOAD_FOLDER'], final_file)):
-                download_link = f"/download/{final_file}"
+            if estimated_safe_name and os.path.exists(os.path.join(app.config['DOWNLOAD_FOLDER'], estimated_safe_name)):
+                download_link = f"/download/{estimated_safe_name}"
             else:
                 error_message = f"Tải xuống thành công nhưng không tìm thấy file MP3 cuối cùng."
 
         except subprocess.CalledProcessError as e:
             if os.path.exists(COOKIE_FILE): os.remove(COOKIE_FILE)
-            error_message = f"Lỗi Tải Xuống: {e.stderr}"
+            # SỬA LỖI: Giải mã lỗi thủ công
+            error_output = e.stderr.decode('utf-8', errors='ignore')
+            if "HTTP Error 403: Forbidden" in error_output:
+                 error_message = "LỖI TẢI XUỐNG: YouTube từ chối truy cập (403 Forbidden). Vui lòng kiểm tra lại cookie của Firefox (đã đăng nhập) và đóng Firefox."
+            else:
+                 error_message = f"Lỗi Tải Xuống: {error_output}"
         
         except Exception as e:
             error_message = f"LỖI HỆ THỐNG: Lỗi chi tiết: {e}"
         
-        # Nếu có lỗi tạm thời (ví dụ: không lấy được title nhưng vẫn tiếp tục tải)
         if not error_message and error_message_temp:
              error_message = error_message_temp
 
