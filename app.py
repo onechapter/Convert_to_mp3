@@ -2,7 +2,7 @@ import os
 import subprocess
 from flask import Flask, render_template, request, send_from_directory
 import re 
-from urllib.parse import urlparse, parse_qs 
+from urllib.parse import urlparse, parse_qs, urlunparse, urlencode
 import time # <-- THÊM THƯ VIỆN TIME
 
 app = Flask(__name__)
@@ -13,6 +13,53 @@ if not os.path.exists(DOWNLOAD_FOLDER):
     os.makedirs(DOWNLOAD_FOLDER)
 
 FFMPEG_LOCATION = "C:\\Program Files\\ffmpeg" 
+MAX_RETRIES = 10
+
+def clean_youtube_url_robust(url: str) -> str:
+    """
+    Rút gọn URL YouTube chỉ giữ lại video ID, xử lý cả dạng /watch?v= và youtu.be/.
+    """
+    parsed_url = urlparse(url)
+
+    # --- 1. Xử lý dạng rút gọn (youtu.be/VIDEO_ID?query) ---
+    if parsed_url.netloc in ('youtu.be'):
+        # Chúng ta chỉ cần Scheme, Netloc và Path. Bỏ qua Query (?si=...)
+        cleaned_url = urlunparse((
+            parsed_url.scheme,       # https
+            parsed_url.netloc,       # youtu.be
+            parsed_url.path,         # /yrlFv0-hkWE
+            '',                      # params (luôn bỏ trống)
+            '',                      # query (loại bỏ ?si=...)
+            ''                       # fragment (loại bỏ #...)
+        ))
+        return cleaned_url
+
+    # --- 2. Xử lý dạng đầy đủ (www.youtube.com/watch?v=...) ---
+    elif parsed_url.netloc in ('www.youtube.com', 'youtube.com'):
+        query_params = parse_qs(parsed_url.query)
+        video_id_list = query_params.get('v')
+        
+        # Nếu không tìm thấy ID video, trả về URL gốc
+        if not video_id_list:
+            return url
+            
+        video_id = video_id_list[0]
+        
+        # Tạo lại query string chỉ với tham số 'v'
+        new_query = urlencode({'v': video_id})
+        
+        cleaned_url = urlunparse((
+            parsed_url.scheme,       # https
+            parsed_url.netloc,       # www.youtube.com
+            parsed_url.path,         # /watch
+            '',                      # params
+            new_query,               # v=yrlFv0-hkWE
+            ''                       # fragment
+        ))
+        return cleaned_url
+        
+    # --- 3. Trường hợp URL không phải YouTube ---
+    return url
 
 # --- HÀM LẤY ID YOUTUBE (Giữ nguyên) ---
 def get_youtube_id(url):
@@ -49,14 +96,15 @@ def rename_and_clean_file(download_folder, old_file_name, video_id):
             else:
                 return old_file_name # Đổi tên thất bại sau 3 lần thử
 
-
 @app.route('/', methods=['GET', 'POST'])
 def index():
     download_link = None
     error_message = None
 
     if request.method == 'POST':
-        youtube_url = request.form.get('url')
+        input_url = request.form.get('url')
+        youtube_url = clean_youtube_url_robust(input_url)
+        print(f"đang thấy thông tin từ {youtube_url}")
         if not youtube_url:
             error_message = "Vui lòng nhập URL YouTube."
             return render_template('index.html', download_link=download_link, error_message=error_message)
@@ -66,102 +114,78 @@ def index():
              error_message = "URL YouTube không hợp lệ."
              return render_template('index.html', error_message=error_message)
              
-        output_template_raw = os.path.join(app.config['DOWNLOAD_FOLDER'], f"{video_id}-%(title)s.%(ext)s") 
+        output_template_raw = os.path.join(app.config['DOWNLOAD_FOLDER'], f"%(title)s-{video_id}.%(ext)s") 
         
         # --- KIỂM TRA TỒN TẠI FILE (BẰNG CÁCH TÌM KIẾM VÀ ĐỔI TÊN NẾU CẦN) ---
-        found_files_with_id = [f for f in os.listdir(DOWNLOAD_FOLDER) if f.startswith(f"{video_id}-") and f.endswith(".mp3")]
-        found_files_without_id = [f for f in os.listdir(DOWNLOAD_FOLDER) if f.endswith(".mp3") and not f.startswith(f"{video_id}-")] 
-        
-        final_existing_file = None
-        
-        # 1. Ưu tiên file đã đổi tên (không có ID)
-        for f in found_files_without_id:
-            # Kiểm tra xem file không ID có chứa ID video không (đảm bảo nó là file của video này)
-            if video_id in f:
-                final_existing_file = f
-                break
-
-        # 2. Nếu không có, tìm file có ID và tiến hành đổi tên
-        if not final_existing_file and found_files_with_id:
-            old_file_name = found_files_with_id[0]
-            new_file_name = rename_and_clean_file(app.config['DOWNLOAD_FOLDER'], old_file_name, video_id)
-            final_existing_file = new_file_name
+        found_files_with_id = [f for f in os.listdir(DOWNLOAD_FOLDER) if  video_id in f]
         
         
-        if final_existing_file:
-            download_link = f"/download/{final_existing_file}"
+        if found_files_with_id:
+            download_link = f"/download/{found_files_with_id[0]}"
             
-            # Cảnh báo nếu đổi tên thất bại (file vẫn còn ID)
-            if final_existing_file.startswith(f"{video_id}-"):
-                 error_message = "Cảnh báo: File đã tồn tại nhưng không thể đổi tên (vẫn còn ID). Vui lòng kiểm tra quyền truy cập file."
-            else:
-                 error_message = "File đã tồn tại. Đây là liên kết tải xuống."
+            error_message = "File đã tồn tại. Đây là liên kết tải xuống."
                  
             return render_template('index.html', download_link=download_link, error_message=error_message)
 
 
         # --- BẮT ĐẦU QUÁ TRÌNH TẢI (SỬ DỤNG --cookies-from-browser) ---
-        try:
-            command = [
-                'yt-dlp',
-                '-x',                       
-                '--audio-format', 'mp3',
-                '-f', 'bestaudio',
-                '--cookies-from-browser', 'firefox', 
-                '--ffmpeg-location', FFMPEG_LOCATION, 
-                '--no-playlist',            
-                '--output', output_template_raw, 
-                '--sleep-requests', '1', 
-                '--no-warnings', 
-                '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36', 
-                '--add-header', 'Accept-Language: en-US,en;q=0.5', 
-                youtube_url                 
-            ]
-            
-            result = subprocess.run(command, check=True, capture_output=True) 
-            
-            # 3. PHÂN TÍCH LOG CỦA YT-DLP để lấy tên file chính xác
-            old_file_name = None
-            output_log = result.stdout.decode('utf-8', errors='ignore') + result.stderr.decode('utf-8', errors='ignore')
-            
-            match = re.search(r'Destination: {}(.+?\.mp3)'.format(re.escape(DOWNLOAD_FOLDER + os.sep)), output_log)
-            
-            if match:
-                old_file_name = match.group(1).strip()
-            
-            
-            if old_file_name and os.path.exists(os.path.join(app.config['DOWNLOAD_FOLDER'], old_file_name)):
-                
-                # --- THAO TÁC ĐỔI TÊN MỚI (Thêm độ trễ và gọi hàm đổi tên) ---
-                time.sleep(1) # Rất quan trọng: Chờ ffmpeg giải phóng file
-                new_file_name = rename_and_clean_file(app.config['DOWNLOAD_FOLDER'], old_file_name, video_id)
-                
-                if new_file_name != old_file_name:
-                    download_link = f"/download/{new_file_name}"
-                else:
-                    download_link = f"/download/{old_file_name}"
-                    error_message = "Cảnh báo: Đổi tên thất bại. Liên kết tải xuống sử dụng tên cũ (có ID)."
-                # -----------------------------
-                
-            else:
-                error_message = f"Tải xuống thành công nhưng không tìm thấy file MP3 cuối cùng."
+        for attempt in range(MAX_RETRIES):
 
-        except subprocess.CalledProcessError as e:
-            error_output = e.stderr.decode('utf-8', errors='ignore')
-            if "HTTP Error 403: Forbidden" in error_output:
-                 error_message = "LỖI TẢI XUỐNG: YouTube từ chối truy cập (403 Forbidden). Vui lòng đảm bảo Firefox đã đóng và bạn đã đăng nhập YouTube."
-            else:
-                 error_message = f"Lỗi Tải Xuống: {error_output}"
-        
-        except Exception as e:
-            error_message = f"LỖI HỆ THỐNG: Lỗi chi tiết: {e}"
-        
+            try:
+                command = [
+                    'yt-dlp',
+                    '-x',                       
+                    '--audio-format', 'mp3',
+                    '-f', 'bestaudio',
+                    '--cookies-from-browser', 'firefox', 
+                    '--ffmpeg-location', FFMPEG_LOCATION, 
+                    '--no-playlist',            
+                    '--output', output_template_raw, 
+                    '--sleep-requests', '1', 
+                    '--no-warnings', 
+                    '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36', 
+                    '--add-header', 'Accept-Language: en-US,en;q=0.5', 
+                    youtube_url                 
+                ]
+                
+                result = subprocess.run(command, check=True, capture_output=True) 
+                
+                break
+            except subprocess.CalledProcessError as e:
+                error_output = e.stderr.decode('utf-8', errors='ignore')
+                if "HTTP Error 403: Forbidden" in error_output:
+                    if attempt < MAX_RETRIES - 1:
+                        print(f"LỖI 403: Bị từ chối truy cập. Thử lại sau 2 giây... (Lần {attempt + 1})")
+                        time.sleep(2)
+                        continue # Tiếp tục vòng lặp retry
+                    else:
+                        # Thử lại lần cuối thất bại
+                        error_message = "LỖI TẢI XUỐNG: YouTube từ chối truy cập (403 Forbidden) sau nhiều lần thử. Vui lòng kiểm tra lại cookie."
+                        return render_template('index.html', error_message=error_message)
+                else:
+                    # Lỗi khác 403, thoát và báo lỗi ngay
+                    error_message = f"Lỗi Tải Xuống: {error_output}"
+                    return render_template('index.html', error_message=error_message)
+
+            except Exception as e:
+                error_message = f"LỖI HỆ THỐNG: Lỗi chi tiết: {e}"
+                return render_template('index.html', error_message=error_message)
+        # --- KẾT THÚC VÒNG LẶP THỬ LẠI ---
+
+        found_files_with_id = [f for f in os.listdir(DOWNLOAD_FOLDER) if  video_id in f]
+
+        if found_files_with_id:
+            download_link = f"/download/{found_files_with_id[0]}"
+        else:
+            error_message = "Lỗi tải file"          
+        return render_template('index.html', download_link=download_link, error_message=error_message)
     return render_template('index.html', download_link=download_link, error_message=error_message)
+        
 
 # Route để phục vụ file đã tải (giữ nguyên)
 @app.route('/download/<filename>')
 def serve_file(filename):
     return send_from_directory(app.config['DOWNLOAD_FOLDER'], filename, as_attachment=True)
-
+    
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(host='0.0.0.0', port=47984, debug=True)
