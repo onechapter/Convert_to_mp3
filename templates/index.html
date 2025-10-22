@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <title>YT-DLP Web Converter</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 50px; text-align: center; background-color: #f4f7f6; }
+        .container { max-width: 600px; margin: 0 auto; padding: 30px; border: 1px solid #ddd; border-radius: 10px; background-color: #fff; box-shadow: 0 4px 8px rgba(0,0,0,0.1); }
+        h1 { color: #007bff; }
+        input[type="text"] { width: 85%; padding: 12px; margin: 15px 0; border: 2px solid #ccc; border-radius: 6px; box-sizing: border-box; font-size: 16px; }
+        input[type="submit"] { padding: 12px 25px; background-color: #28a745; color: white; border: none; border-radius: 6px; cursor: pointer; font-size: 16px; transition: background-color 0.3s; }
+        input[type="submit"]:hover { background-color: #218838; }
+        .success { color: #155724; background-color: #d4edda; border: 1px solid #c3e6cb; padding: 10px; margin-top: 20px; border-radius: 5px; font-weight: bold; }
+        .error { color: #721c24; background-color: #f8d7da; border: 1px solid #f5c6cb; padding: 10px; margin-top: 20px; border-radius: 5px; font-weight: bold; }
+        /* CSS cho nút Làm mới */
+        button { 
+            padding: 12px 25px; 
+            background-color: #6c757d; /* Màu xám */
+            color: white; 
+            border: none; 
+            border-radius: 6px; 
+            cursor: pointer; 
+            font-size: 16px; 
+            transition: background-color 0.3s;
+            margin-left: 10px; /* Tạo khoảng cách với nút Tải về */
+        }
+        button:hover { 
+            background-color: #5a6268; 
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎵 YT-DLP MP3 Downloader 🎵</h1>
+        <form method="POST">
+            <input type="text" name="url" placeholder="Dán URL YouTube (hoặc các trang khác) vào đây" required>
+            <input type="submit" value="Tải về MP3">
+            <button type="button" onclick="window.location.href='/'">
+                Làm mới
+            </button>
+        </form>
+
+        {% if download_link %}
+            <div class="success">
+                Tải xuống thành công! <br>
+                <a href="{{ download_link }}" target="_blank">👉 Bấm vào đây để tải file MP3 👈</a>
+            </div>
+        {% endif %}
+
+        {% if error_message %}
+            <div class="error">
+                Lỗi: {{ error_message }}
+            </div>
+        {% endif %}
+    </div>
+</body>
+</html>
